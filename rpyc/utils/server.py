@@ -68,8 +68,10 @@ class Server(object):
                 raise ValueError("socket_path is mutually exclusive with: hostname, port, ipv6")
             self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.listener.bind(socket_path)
+            self.listener.settimeout(listener_timeout)
             # set the self.port to the path as it's used for the registry and logging
             self.host, self.port = "", socket_path
+            self._socket_path = socket_path
         else:
             if ipv6:
                 if hostname == "localhost" and sys.platform != "win32":
@@ -106,6 +108,9 @@ class Server(object):
         also unregisters from the registry server"""
         if self._closed:
             return
+        if hasattr(self, '_socket_path'):
+            os.remove(self._socket_path)
+
         self._closed = True
         self.active = False
         if self.auto_register:
