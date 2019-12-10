@@ -140,7 +140,7 @@ getsockopt = winsock.getsockopt
 getsockopt.argtypes = (
     SOCKET,
     ctypes.c_int, # level (eg SOL_SOCKET)
-    ctypes.c_int, # optname
+    ctypes.c_int, # optname (eg SO_ERROR)
     ctypes.c_void_p, # optval
     ctypes.POINTER(ctypes.c_int), # optlen
 )
