@@ -1,29 +1,17 @@
 """
-Impersonate a Unix domain socket using a Windows Unix domain socket.
+Impersonate a Unix domain socket using ... a Unix domain socket.
 
-There's no python support for them on Windows: bpo-33408.
+Microsoft added support for AF_UNIX to Windows 10 in early 2018.
+There's no python support as of Python 3.8: bpo-33408.
 
-We just impersonate what's required for RPyC.
+This file is a partial reimplementation of CPython's socketmodule.c
 
-We need to implement the following functions for 
-server.py and stream.py:
-#   accept -
-#   bind -
-#   close -
-#   connect -
-#   fileno -
-#   getpeername -
-#   getsockname -
-#   listen -
-#   recv -
-#   send -
-#   shutdown -
-#   setblocking -
-#   settimeout -
-That last one means we need to use overlapped IO (async IO).
+What's here is just what's needed for RPyC itself, and there's probably less
+error-handling.
 
-We don't seem to need any others. setsockopt is present but not in the code
-paths we need.
+See also rpyc.lib.compat which is responsible for defining unix_socket to point
+either to socket.socket or to win_unix_socket.WindowsUnixSocket depending on
+the platform.
 """
 from __future__ import division
 import ctypes
@@ -36,7 +24,6 @@ socket.AF_UNIX = 1
 POLLIN = 0x100 | 0x200
 POLLOUT = 0x10
 WSAEINTR = 10004
-INFINITE = -1
 FIONBIO = 0x8004667e
 MAX_PATH_LENGTH = 260
 WSAEWOULDBLOCK = 10035
@@ -63,7 +50,7 @@ def init_winsock():
         _fields_ = (
             ('wVersion', ctypes.wintypes.WORD),
             ('wHighVersion', ctypes.wintypes.WORD),
-            ('foo', ctypes.c_char * 4000), # unclear, but a page should be plenty enough.
+            ('foo', ctypes.c_char * 4000), # size unclear, this should be enough
         )
     data = WSAData()
 
@@ -290,7 +277,10 @@ def call_socket_fn(s, r_w_connect, sockfn):
     Heavily based on cpython's sock_call_ex.
     """
     # QueryPerformanceCounter, monotonic and accurate to sub-microsecond.
-    timeout = s._timeout
+    if s._timeout is None:
+        timeout = -1
+    else:
+        timeout = s._timeout
     if timeout >= 0:
         end_t = time.clock() + timeout
 
@@ -348,12 +338,12 @@ class WindowsUnixSocket(object):
     does, so we need to reimplement socketmodule.c to get compatibility.
     """
     __slots__ = (
-        "_sock_fd",
-        "_timeout",
+        "_sock_fd", # socket "file" descriptor
+        "_timeout", # timeout in seconds, None for infinite
     )
 
     def __init__(self, af=socket.AF_UNIX, type=socket.SOCK_STREAM, proto=0, fd = None):
-        self._timeout = INFINITE
+        self._timeout = None
         if af != socket.AF_UNIX or type != socket.SOCK_STREAM:
             raise socket.error(WSA_INVALID_PARAMETER,
                 "Invalid family or type: AF_UNIX and SOCK_STREAM is what we implement")
@@ -369,7 +359,7 @@ class WindowsUnixSocket(object):
         None means block forever.
         """
         if seconds is None or seconds < 0:
-            self._timeout = INFINITE
+            self._timeout = None
             is_async = ctypes.wintypes.ULONG(0)
         else:
             self._timeout = seconds
