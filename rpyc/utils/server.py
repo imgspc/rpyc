@@ -17,7 +17,7 @@ from rpyc.core import SocketStream, Channel
 from rpyc.utils.registry import UDPRegistryClient
 from rpyc.utils.authenticators import AuthenticationError
 from rpyc.lib import safe_import, spawn, spawn_waitready
-from rpyc.lib.compat import poll, get_exc_errno
+from rpyc.lib.compat import poll, get_exc_errno, unix_socket
 signal = safe_import("signal")
 gevent = safe_import("gevent")
 
@@ -66,7 +66,10 @@ class Server(object):
         if socket_path is not None:
             if hostname != "" or port != 0 or ipv6 is not False:
                 raise ValueError("socket_path is mutually exclusive with: hostname, port, ipv6")
-            self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            if logger is not None:
+                logger.info("Creating server on socket at {}".format(socket_path))
+            # Use Unix Domain sockets (from lib.compat for windows support).
+            self.listener = unix_socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.listener.bind(socket_path)
             self.listener.settimeout(listener_timeout)
             # set the self.port to the path as it's used for the registry and logging
@@ -81,6 +84,11 @@ class Server(object):
             else:
                 self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+            if logger is not None:
+                logger.info("Creating server on socket at {}:{}".format(
+                    hostname,
+                    port,
+                ))
             if reuse_addr and sys.platform != "win32":
                 # warning: reuseaddr is not what you'd expect on windows!
                 # it allows you to bind an already bound port, resulting in
@@ -266,10 +274,13 @@ class Server(object):
             while self.active:
                 self.accept()
         except EOFError:
-            pass  # server closed by another thread
+            self.logger.info("server closed on another thread")
         except KeyboardInterrupt:
             print("")
             self.logger.warn("keyboard interrupt!")
+        except:
+            self.logger.exception("exception in server loop")
+            raise
         finally:
             self.logger.info("server has terminated")
             self.close()

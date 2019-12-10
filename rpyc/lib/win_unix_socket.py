@@ -25,22 +25,37 @@ That last one means we need to use overlapped IO (async IO).
 We don't seem to need any others. setsockopt is present but not in the code
 paths we need.
 """
+from __future__ import division
 import ctypes
 import ctypes.wintypes
 import socket
 import time
-from rpyc.lib import Timeout
+import sys
 
-AF_UNIX = 1
+socket.AF_UNIX = 1
 POLLIN = 0x100 | 0x200
 POLLOUT = 0x10
 WSAEINTR = 10004
 INFINITE = -1
 FIONBIO = 0x8004667e
 MAX_PATH_LENGTH = 260
+WSAEWOULDBLOCK = 10035
+SOL_SOCKET = 65535
+SO_ERROR = 4103
+EISCONN = 10056
+WSA_INVALID_PARAMETER = 87
+FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x100
+FORMAT_MESSAGE_FROM_SYSTEM = 0x1000
+FORMAT_MESSAGE_IGNORE_INSERTS = 0x200
+FORMAT_MESSAGE_FLAGS = (FORMAT_MESSAGE_ALLOCATE_BUFFER
+    | FORMAT_MESSAGE_FROM_SYSTEM
+    | FORMAT_MESSAGE_IGNORE_INSERTS
+)
+
 
 # Get the windows API calls we need.
-runtime = ctypes.windll.ws2_32
+winsock = ctypes.windll.ws2_32
+kernel = ctypes.windll.kernel32
 
 # On startup (when we import this module), initialize winsock.
 def init_winsock():
@@ -48,25 +63,32 @@ def init_winsock():
         _fields_ = (
             ('wVersion', ctypes.wintypes.WORD),
             ('wHighVersion', ctypes.wintypes.WORD),
-            ('foo', ctypes.CHAR * 4000), # unclear, but a page should be plenty enough.
+            ('foo', ctypes.c_char * 4000), # unclear, but a page should be plenty enough.
         )
     data = WSAData()
 
     # Request API 2.2 which is available since win98/win2k, 20 years before
     # AF_UNIX support was finally added.
-    runtime.WSAStartup(0x0202, data)
+    winsock.WSAStartup(0x0202, data)
 init_winsock()
 
 
 # The SOCKET type is intptr.
-SOCKET = cypes.c_void_p
+SOCKET = ctypes.c_void_p
 
 # sockaddr_un for storing unix addresses.
 class sockaddr_un(ctypes.Structure):
     _fields_ = (
         ('sun_family', ctypes.c_ushort),
-        ('sun_path', ctypes.c_char * MAX_PATH_LENGTH),
+        ('sun_path', ctypes.c_byte * MAX_PATH_LENGTH),
     )
+
+    @property
+    def path(self):
+        """
+        Return the path as an ascii string.
+        """
+        return ctypes.cast(self.sun_path, ctypes.c_char_p).value
 
 # for poll
 class pollfd(ctypes.Structure):
@@ -79,60 +101,70 @@ class pollfd(ctypes.Structure):
 #########################
 # Import the calls we need
 
-socket = runtime.socket
-socket.argtypes = (
+# rename to socket_fn to avoid clash with socket module
+socket_fn = winsock.socket
+socket_fn.argtypes = (
     ctypes.c_int, # address family
     ctypes.c_int, # type
     ctypes.c_int, # protocol
 )
 
-accept = runtime.accept
+accept = winsock.accept
 accept.argtypes = (
     SOCKET,
     ctypes.POINTER(sockaddr_un),
     ctypes.POINTER(ctypes.c_int),
 )
 
-bind = runtime.bind
+bind = winsock.bind
 bind.argtypes = (
     SOCKET,
     ctypes.POINTER(sockaddr_un),
     ctypes.c_int,
 )
 
-close = runtime.closesocket
+close = winsock.closesocket
 close.argtypes = (
     SOCKET,
 )
 
-connect = runtime.connect
+connect = winsock.connect
 connect.argtypes = (
     SOCKET,
     ctypes.POINTER(sockaddr_un),
     ctypes.c_int,
 )
 
-getpeername = runtime.getpeername
+getpeername = winsock.getpeername
 getpeername.argtypes = (
     SOCKET,
     ctypes.POINTER(sockaddr_un),
     ctypes.POINTER(ctypes.c_int),
 )
 
-getsockname = runtime.getsockname
+getsockname = winsock.getsockname
 getsockname.argtypes = (
     SOCKET,
     ctypes.POINTER(sockaddr_un),
     ctypes.POINTER(ctypes.c_int),
 )
 
-listen = runtime.listen
+getsockopt = winsock.getsockopt
+getsockopt.argtypes = (
+    SOCKET,
+    ctypes.c_int, # level (eg SOL_SOCKET)
+    ctypes.c_int, # optname
+    ctypes.c_void_p, # optval
+    ctypes.POINTER(ctypes.c_int), # optlen
+)
+
+listen = winsock.listen
 listen.argtypes = (
     SOCKET,
     ctypes.c_int, # backlog
 )
 
-recv = runtime.recv
+recv = winsock.recv
 recv.argtypes = (
     SOCKET,
     ctypes.c_char_p, # buf
@@ -140,7 +172,7 @@ recv.argtypes = (
     ctypes.c_int, # flags
 )
 
-send = runtime.send
+send = winsock.send
 send.argtypes = (
     SOCKET,
     ctypes.c_char_p, # buf
@@ -148,29 +180,75 @@ send.argtypes = (
     ctypes.c_int, # flags
 )
 
-shutdown = runtime.shutdown
+shutdown = winsock.shutdown
 shutdown.argtypes = (
     SOCKET,
     ctypes.c_int, # how
 )
 
-errno_fn = runtime.WSAGetLastError
+errno_fn = winsock.WSAGetLastError
 errno_fn.argtypes = ()
 
+WSASetLastError = winsock.WSASetLastError
+WSASetLastError.argtypes = (
+    ctypes.c_int,
+)
+
 # for setblocking
-ioctl = runtime.ioctlsocket
+ioctl = winsock.ioctlsocket
 ioctl.argtypes = (
     SOCKET,
     ctypes.c_long, # cmd
     ctypes.POINTER(ctypes.c_ulong), # argp
 )
 
-poll = runtime.poll
+poll = winsock.WSAPoll
 poll.argtypes = (
     ctypes.POINTER(pollfd), # fds
     ctypes.c_ulong, # number of fds
     ctypes.c_int, # timeout (ms)
 )
+
+# for printing errors
+FormatMessageW = kernel.FormatMessageW
+FormatMessageW.argtypes = (
+        ctypes.wintypes.DWORD, # flags
+        ctypes.c_void_p, # source (?)
+        ctypes.wintypes.DWORD, # message
+        ctypes.wintypes.DWORD, # language (0 for default lang)
+        ctypes.c_void_p, # buffer; declared as LPWSTR but actually WCHAR**
+        ctypes.wintypes.DWORD, # buffer size
+        ctypes.c_void_p, # va_args
+)
+LocalFree = kernel.LocalFree
+LocalFree.argtypes = (
+    ctypes.c_void_p,
+)
+
+# Raise a socket.error
+def raise_socket(errno):
+    """
+    Raise a Windows error as a socket.error.
+
+    Attach the windows error message.
+    """
+    buf = ctypes.c_wchar_p(None)
+
+    FormatMessageW(
+        FORMAT_MESSAGE_FLAGS,
+        None,
+        errno,
+        0,
+        ctypes.byref(buf),
+        0,
+        None,
+    )
+    try:
+        msg = unicode(buf.value)
+    finally:
+        LocalFree(buf)
+
+    raise socket.error(errno, msg)
 
 
 # copy the concept in cpython:
@@ -178,6 +256,7 @@ poll.argtypes = (
 #   * first, evaluate the function
 #   * if interrupted by a signal, retry
 #   * if timeout is set, run async and wait for completion or timeout.
+
 def wait_for_fd(s, r_w_connect, timeout):
     """
     Wait until the socket is ready.
@@ -195,7 +274,7 @@ def wait_for_fd(s, r_w_connect, timeout):
     else:
         p.events = POLLIN | POLLERR
 
-    return poll(byref(p), 1, timeout)
+    return poll(ctypes.byref(p), 1, int(timeout))
 
 def call_socket_fn(s, r_w_connect, sockfn):
     """
@@ -205,20 +284,24 @@ def call_socket_fn(s, r_w_connect, sockfn):
     r_w_connect is 0 for read, 1 for write, 2 for connect
 
     The socket must be non-blocking unless timeout is -1.
-    The caller must make sure the sockfn is calling a socket function on
-    the socket passed in; we can't check.
+
+    sockfn should be a lambda that returns non-zero on success and zero on fail.
 
     Heavily based on cpython's sock_call_ex.
     """
     # QueryPerformanceCounter, monotonic and accurate to sub-microsecond.
     timeout = s._timeout
     if timeout >= 0:
-        start_t = time.clock()
-        end_t = start_t + timeout
+        end_t = time.clock() + timeout
 
     while True:
+        # wait until we can do the thing; always wait if we're connecting
         if timeout > 0 or r_w_connect == 2:
-            err = wait_for_fd(s, r_w_connect, end_t - time.clock())
+            if timeout < 0:
+                milliseconds = -1
+            else:
+                milliseconds = max(1, int( (end_t - time.clock()) * 1000.0))
+            err = wait_for_fd(s, r_w_connect, milliseconds)
             if err < 0:
                 # get the error reason
                 err = errno_fn()
@@ -227,38 +310,34 @@ def call_socket_fn(s, r_w_connect, sockfn):
                     continue
                 else:
                     # some other kind of error => raise
-                    raise socket.error(err, "Windows error {}".format(err))
+                    raise_socket(err)
             elif err == 0:
                 # timeout
                 raise socket.timeout("timed out")
 
-            # socket is ready; do the thing (loop until we aren't interrupted)
-            while True:
-                ok = (sockfn() == 0)
-                if ok:
-                    ######################
-                    # The thing is done!
-                    # This is the only success codepath.
-                    ######################
-                    return
+        # socket is ready; do the thing (loop until we aren't interrupted)
+        # the loop sets 'err' if we break out of the loop.
+        while True:
+            ok = (sockfn() != 0)
+            if ok:
+                ######################
+                # The thing is done!
+                # This is the only success codepath.
+                ######################
+                return
+            else:
+                # why did it fail?
+                err = errno_fn()
+                if err == WSAEINTR:
+                    # interrupted by signal (and didn't raise) => retry
+                    continue
+                elif timeout > 0 and err == WSAEWOULDBLOCK:
+                    # break this loop, continue outer loop that does a poll()
+                    # and waits for the async IO to finish.
+                    break
                 else:
-                    # why did it fail?
-                    err = errno_fn()
-                    if err == WSAEINTR:
-                        # interrupted by signal (and didn't raise) => retry
-                        continue
-                    else:
-                        # not interrupted by signal => break out to outer while
-                        # loop and handle it there.
-                        break
-
-            if err = WSAEWOULDBLOCK or err = WSAEAGAIN:
-                # non-blocking IO fails with this until IO is done; loop
-                # back to the poll().
-                continue
-
-            # if we're here, the error is scary
-            raise socket.error(err, "Windows error {}")
+                    # if we're here, the error is scary
+                    raise_socket(err)
 
 
 class WindowsUnixSocket(object):
@@ -273,14 +352,16 @@ class WindowsUnixSocket(object):
         "_timeout",
     )
 
-    def __init__(self, af=AF_UNIX, type=socket.SOCK_STREAM, proto=0, fd = None):
+    def __init__(self, af=socket.AF_UNIX, type=socket.SOCK_STREAM, proto=0, fd = None):
         self._timeout = INFINITE
-        if af != AF_UNIX or type != socket.SOCK_STREAM:
-            raise socket.error("Invalid family or type: AF_UNIX and SOCK_STREAM is what we implement")
+        if af != socket.AF_UNIX or type != socket.SOCK_STREAM:
+            raise socket.error(WSA_INVALID_PARAMETER,
+                "Invalid family or type: AF_UNIX and SOCK_STREAM is what we implement")
         if fd is None:
-            self._sock_fd = socket(AF_UNIX, socket.SOCK_STREAM, 0)
+            self._sock_fd = socket_fn(socket.AF_UNIX, socket.SOCK_STREAM, 0)
         else:
             self._sock_fd = fd
+
 
     def settimeout(self, seconds):
         """
@@ -291,7 +372,7 @@ class WindowsUnixSocket(object):
             self._timeout = INFINITE
             is_async = ctypes.wintypes.ULONG(0)
         else:
-            self._timeout = int(seconds * 1000)
+            self._timeout = seconds
             is_async = ctypes.wintypes.ULONG(1)
         ioctl(self._sock_fd, FIONBIO, ctypes.byref(is_async))
 
@@ -312,27 +393,30 @@ class WindowsUnixSocket(object):
                     "Socket path name too long ({} bytes, max {})".format(nbytes, MAX_PATH_LENGTH)
             )
         addr = sockaddr_un()
-        addr.sun_family = AF_UNIX
-        ctypes.memmove(addr.sun_path, path, nbytes - 1)
-        addr.sun_path[nbytes - 1] = 0
-        if bind(self._sock, ctypes.byref(addr), ctypes.sizeof(addr)) != 0:
-            raise socket.error(errno_fn(), "Windows error {}".format(errno_fn()))
+        addr.sun_family = socket.AF_UNIX
+        # copy the name including the null terminator (cpython has null-terminated strings under the hood)
+        ctypes.memmove(addr.sun_path, path, nbytes)
+        if bind(self._sock_fd, ctypes.byref(addr), ctypes.sizeof(addr)) != 0:
+            raise_socket(errno_fn())
 
     def listen(self, n):
         """
         Start to listen on the named pipe.
         """
         if listen(self._sock_fd, n) != 0:
-            raise socket.error(errno_fn(), "Windows error {}".format(errno_fn()))
+            raise_socket(errno_fn())
 
     def accept(self):
         """
         Block until an incoming connection arrives, or until the timeout elapses.
+
+        Returns a pair with the socket and the peer address.
+        Note: the peer is normally anonymous; a blank string is normal.
         """
         addr = sockaddr_un()
-        n = ctypes.c_int()
+        n = ctypes.c_int(ctypes.sizeof(addr))
         nonlocal_fd = [None]
-        def accept_and_return_zero():
+        def do_accept():
             """
             Do the accept, return 0 and write to the_fd[0] on success.
 
@@ -341,10 +425,10 @@ class WindowsUnixSocket(object):
             s = accept(self._sock_fd, ctypes.byref(addr), ctypes.byref(n))
             if int(s) >= 0:
                 nonlocal_fd[0] = s
-                return 0
-            return -1
-        call_socket_fn(self, 0, accept_and_return_zero)
-        return (WindowsUnixSocket(fd = nonlocal_fd[0]), str(addr.sun_family))
+                return 1
+            return 0
+        call_socket_fn(self, 0, do_accept)
+        return (WindowsUnixSocket(fd = nonlocal_fd[0]), addr.path)
 
     def shutdown(self, how):
         """
@@ -369,17 +453,46 @@ class WindowsUnixSocket(object):
         unless an exception was raised.
         """
         path = bytes(path)
+        # copy the name including the null terminator (cpython has null-terminated strings under the hood)
         nbytes = len(path) + 1
         if nbytes > MAX_PATH_LENGTH:
             raise socket.error(ERROR_BAD_PATHNAME,
                     "Socket path name too long ({} bytes, max {})".format(nbytes, MAX_PATH_LENGTH)
             )
         addr = sockaddr_un()
-        addr.sun_family = AF_UNIX
-        ctypes.memmove(addr.sun_path, path, nbytes - 1)
-        addr.sun_path[nbytes - 1] = 0
+        addr.sun_family = socket.AF_UNIX
+        ctypes.memmove(addr.sun_path, path, nbytes)
 
-        call_socket_fn(self, 0, lambda: connect(self._sock_fd, ctypes.byref(addr), ctypes.sizeof(addr)))
+        # Try to connect. Might even succeed already!
+        res = connect(self._sock_fd, ctypes.byref(addr), ctypes.sizeof(addr))
+        if res == 0:
+            return
+
+        # Failed. Could be that it's non-blocking, or that it's interrupted, or
+        # that there was actually an error.
+        err = errno_fn()
+        if err != WSAEINTR and err != WSAEWOULDBLOCK:
+            # this is really an error
+            raise_socket(err)
+
+        # Wait for connection to finish, using getsockopt.
+        def check_connected():
+            err = ctypes.c_int()
+            n = ctypes.c_int(ctypes.sizeof(err))
+            res = getsockopt(self._sock_fd, SOL_SOCKET, SO_ERROR, ctypes.byref(err), ctypes.byref(n))
+            if res != 0:
+                # getsockopt itself failed.
+                return 0
+            if err.value == 0 or err.value == EISCONN:
+                # If there's no error, success!
+                # If the error is that we're connected... also success!
+                return 1
+            else:
+                # We saw an error on the socket; the caller expects that
+                # error to be in errno so set the winsock version of errno.
+                WSASetLastError(err.value)
+                return 0
+        call_socket_fn(self, 0, check_connected)
 
     def fileno(self):
         if int(self._sock_fd) < 0:
@@ -389,31 +502,44 @@ class WindowsUnixSocket(object):
 
     def getpeername(self):
         addr = sockaddr_un()
-        n = ctypes.c_int()
+        n = ctypes.c_int(ctypes.sizeof(addr))
         if getpeername(self._sock_fd, ctypes.byref(addr), ctypes.byref(n)) != 0:
-            raise socket.error(errno_fn(), "Windows error {}".format(errno_fn()))
-        return str(addr.sun_family)
+            raise_socket(errno_fn())
+        return addr.path
 
     def getsockname(self):
         addr = sockaddr_un()
-        n = ctypes.c_int()
+        n = ctypes.c_int(ctypes.sizeof(addr))
         if getsockname(self._sock_fd, ctypes.byref(addr), ctypes.byref(n)) != 0:
-            raise socket.error(errno_fn(), "Windows error {}".format(errno_fn()))
-        return str(addr.sun_family)
+            raise_socket(errno_fn())
+        return addr.path
 
     def recv(self, n):
         buffer = ctypes.create_string_buffer(n)
-        call_socket_fn(self, 0, lambda: recv(self._sock_fd, buffer, n, 0))
-        return buffer.value
+        nonlocal_n = []
+        def do_recv():
+            res = recv(self._sock_fd, buffer, n, 0)
+            if res >= 0:
+                # res is the number of bytes actually received
+                nonlocal_n.append(res)
+                return 1
+            # otherwise, some other kind of error
+            return 0
+        call_socket_fn(self, 0, do_recv)
+        n = nonlocal_n[0]
+        # important: not buffer.value which truncates at the first nul
+        return bytes(bytearray(buffer[:n]))
 
     def send(self, msg):
         buffer = bytes(msg)
-        nonlocal_n = [None]
-        def send_and_ret0():
-            n = send(self._sock_fd, buffer, len(buffer), 0)
-            if n < 0:
-                return -1
-            else:
-                nonlocal_n[0] = n
-        call_socket_fn(self, 1, send_and_ret0)
+        nonlocal_n = []
+        def do_send():
+            res = send(self._sock_fd, buffer, len(buffer), 0)
+            if res >= 0:
+                # res is the number of bytes actually sent
+                nonlocal_n.append(res)
+                return 1
+            # otherwise, some kind of error
+            return 0
+        call_socket_fn(self, 1, do_send)
         return nonlocal_n[0]
