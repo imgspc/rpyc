@@ -36,7 +36,6 @@ class Test_ThreadedServerOverUnixSocket(unittest.TestCase):
 
     def tearDown(self):
         self.server.close()
-        os.remove(self.socket_path)
 
     def test_connection(self):
         c = rpyc.classic.unix_connect(self.socket_path)
