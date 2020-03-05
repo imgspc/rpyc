@@ -208,8 +208,8 @@ if sys.platform == 'win32':
         key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
         val = r"ReleaseID"
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as key:
-            return int(winreg.QueryValueEx(key,val)[0])
+            return int(winreg.QueryValueEx(key, val)[0])
     if get_release_id() >= 1803:
         from rpyc.lib.win_unix_socket import WindowsUnixSocket as unix_socket
 else:
-    from socket import socket as unix_socket
+    from socket import socket as unix_socket  # noqa: F401

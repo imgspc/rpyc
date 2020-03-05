@@ -278,7 +278,7 @@ class Server(object):
         except KeyboardInterrupt:
             print("")
             self.logger.warn("keyboard interrupt!")
-        except:
+        except Exception:
             self.logger.exception("exception in server loop")
             raise
         finally:

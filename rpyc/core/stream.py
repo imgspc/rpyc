@@ -7,7 +7,7 @@ import os
 import socket
 import errno
 from rpyc.lib import safe_import, Timeout, socket_backoff_connect
-from rpyc.lib.compat import (
+from rpyc.lib.compat import (  # noqa: F401
     poll,
     select_error,
     BYTES_LITERAL,
