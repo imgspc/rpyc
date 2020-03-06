@@ -338,7 +338,7 @@ def call_socket_fn(s, r_w_connect, sockfn):
 
 def _make_address(path):
     """
-    Creates the sockaddr_un srtucture based on the path given to this method.
+    Creates the sockaddr_un structure based on the path given to this method.
     """
     # Must be bytes!
     if not isinstance(path, bytes):
