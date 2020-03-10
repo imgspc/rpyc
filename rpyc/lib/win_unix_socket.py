@@ -268,7 +268,7 @@ def wait_for_fd(s, r_w_connect, timeout):
     elif r_w_connect == 1:
         p.events = POLLOUT
     else:
-        p.events = POLLIN | POLLERR
+        p.events = POLLIN | POLLOUT
 
     return poll(ctypes.byref(p), 1, int(timeout))
 
@@ -485,7 +485,7 @@ class WindowsUnixSocket(object):
                 # error to be in errno so set the winsock version of errno.
                 WSASetLastError(err.value)
                 return 0
-        call_socket_fn(self, 0, check_connected)
+        call_socket_fn(self, 2, check_connected)
 
     def fileno(self):
         if int(self._sock_fd) < 0:
