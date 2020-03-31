@@ -189,3 +189,27 @@ if sys.version_info >= (3, 2):
 else:
     def acquire_lock(lock, blocking, timeout):
         return lock.acquire(blocking)
+
+# Provide a unix_socket class that works cross-platform. It has the same API
+# as python's socket (and except on windows, *is* python's socket).
+#
+# On Windows, this is available on windows 10, spring 2018 (release 1803).
+if sys.platform == 'win32':
+    # Release announcement:
+    #   https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/
+    # It's in release 1803 of windows 10.
+    # Python support is not yet available as of Python 3.8, see bpo-33408:
+    #    https://github.com/python/cpython/pull/14823/files
+    def get_release_id():
+        if sys.version_info <= (3, 0):
+            import _winreg as winreg
+        else:
+            import winreg
+        key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        val = r"ReleaseID"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as key:
+            return int(winreg.QueryValueEx(key, val)[0])
+    if get_release_id() >= 1803:
+        from rpyc.lib.win_unix_socket import WindowsUnixSocket as unix_socket
+else:
+    from socket import socket as unix_socket  # noqa: F401

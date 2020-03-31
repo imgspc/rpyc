@@ -7,7 +7,14 @@ import os
 import socket
 import errno
 from rpyc.lib import safe_import, Timeout, socket_backoff_connect
-from rpyc.lib.compat import poll, select_error, BYTES_LITERAL, get_exc_errno, maxint  # noqa: F401
+from rpyc.lib.compat import (  # noqa: F401
+    poll,
+    select_error,
+    BYTES_LITERAL,
+    get_exc_errno,
+    maxint,
+    unix_socket,
+)
 win32file = safe_import("win32file")
 win32pipe = safe_import("win32pipe")
 win32event = safe_import("win32event")
@@ -179,7 +186,7 @@ class SocketStream(Stream):
         :param path: the path to the unix domain socket
         :param timeout: socket timeout
         """
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s = unix_socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             s.settimeout(timeout)
             s.connect(path)
